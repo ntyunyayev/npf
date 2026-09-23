@@ -160,6 +160,11 @@ def add_testing_options(parser: ArgumentParser, regression: bool = False):
                     help='Use data from the previous experiments. If the same combination of variables was already tried, do not re-run the experiment but keep results. This allows fast exploration of the parameter space.',
                     dest='force_retest', action='store_false',
                     default=True)
+    t.add_argument('--kill-grace',
+                   help='Seconds to keep reading a remote script\'s output after it is sent Ctrl-C '
+                        '(autokill or timeout), before the SSH session is closed. Output printed from '
+                        'a signal handler (e.g. a final stats block) is lost if it arrives later.',
+                   dest='kill_grace', type=float, default=10)
     t.add_argument('--no-init',
                    help='Do not run any init scripts', dest='do_init', action='store_false',
                    default=True)

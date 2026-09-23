@@ -145,10 +145,20 @@ class SSHExecutor(Executor):
             rpid = -1
             pid = os.getpid()
             step = 0.2
+            # After Ctrl-C, keep reading until the script exits or the grace
+            # window ends: closing the session tears down unbuffer's pty, which
+            # SIGHUPs the script, so anything its SIGINT handler prints after
+            # that is lost.
+            kill_grace = getattr(options, 'kill_grace', 10) if options else 10
+            killed_at = None
+            ctrlc_sent = False
             #for channel in channels:
             #   channel.channel.setblocking(False)
 
-            while ((nokill or not event.is_terminated()) and not ssh_stdout.channel.exit_status_ready()) or (ssh_stdout.channel.recv_ready() or ssh_stderr.channel.recv_ready()):
+            while ((nokill or not event.is_terminated()) and not ssh_stdout.channel.exit_status_ready()) \
+                    or (ssh_stdout.channel.recv_ready() or ssh_stderr.channel.recv_ready()) \
+                    or (ctrlc_sent and not ssh_stdout.channel.exit_status_ready()
+                        and time.time() - killed_at < kill_grace):
                 try:
                     line = None
                     for ichannel,channel in enumerate(channels):
@@ -179,7 +189,11 @@ class SSHExecutor(Executor):
                                 raise(e)
 
                     else:
-                        event.wait_for_termination(step)
+                        if ctrlc_sent:
+                            # wait_for_termination returns at once when terminated
+                            time.sleep(step)
+                        else:
+                            event.wait_for_termination(step)
                         if timeout is not None:
                             timeout -= step
                 except PipeTimeout:
@@ -198,18 +212,33 @@ class SSHExecutor(Executor):
                         event.terminate()
                         pid = 0
                         break
-                if not nokill and event.is_terminated():
+                # Signal once: re-sending Ctrl-C every pass of the grace window
+                # would interrupt the script's own shutdown handler.
+                if not nokill and event.is_terminated() and killed_at is None:
+                    killed_at = time.time()
                     print("Terminated, so killing if", queue)
-                    if not ssh_stdin.channel.closed:
-
+                    # Ctrl-C only reaches the script through `unbuffer -p`'s pty,
+                    # i.e. when stdin was given. Then do NOT also kill the outer
+                    # shell yet: that ends the channel at once (cutting the grace
+                    # window short) and the session teardown SIGHUPs the script
+                    # mid-handler. The kill is deferred to after the grace window.
+                    ctrlc_sent = stdin is not None and not ssh_stdin.channel.closed
+                    if ctrlc_sent:
                         if options and options.debug:
-                            print("[DEBUG] %s: Sending SIGKILL to %d" % (title,rpid))
+                            print("[DEBUG] %s: Sending Ctrl-C to %d" % (title,rpid))
                         ssh_stdin.channel.send(chr(3))
-                    ssh.exec_command("kill "+str(rpid))
+                    else:
+                        ssh.exec_command("kill "+str(rpid))
+                        ssh_stdout.channel.status_event.wait(timeout=1)
 #                   unneeded ssh.exec_command("kill $(ps -s  "+str(rpid)+" -o pid=)" )
                     i=0
-                    ssh_stdout.channel.status_event.wait(timeout=1)
                 # end of loop
+
+            if killed_at is not None and ctrlc_sent and not ssh_stdout.channel.exit_status_ready():
+                # grace window over and the script is still alive: fall back to
+                # the original behaviour.
+                ssh.exec_command("kill "+str(rpid))
+                ssh_stdout.channel.status_event.wait(timeout=1)
 
             if event.is_terminated():
                 ret = 0 #Ignore return code because we kill it before completion.
