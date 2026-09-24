@@ -155,7 +155,14 @@ class SSHExecutor(Executor):
             #for channel in channels:
             #   channel.channel.setblocking(False)
 
+            # The kill block is at the BOTTOM of the body but termination is
+            # tested at the TOP. A terminate landing between the two would end
+            # the loop with the script never signalled (it then dies of SIGHUP
+            # on ssh.close(), output lost), so keep going until the kill block
+            # has run once for a still-alive script.
             while ((nokill or not event.is_terminated()) and not ssh_stdout.channel.exit_status_ready()) \
+                    or (not nokill and killed_at is None and event.is_terminated()
+                        and not ssh_stdout.channel.exit_status_ready()) \
                     or (ssh_stdout.channel.recv_ready() or ssh_stderr.channel.recv_ready()) \
                     or (ctrlc_sent and not ssh_stdout.channel.exit_status_ready()
                         and time.time() - killed_at < kill_grace):
